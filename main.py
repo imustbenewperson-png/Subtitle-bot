@@ -1,0 +1,129 @@
+import os
+import subprocess
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TOKEN = os.environ.get("BOT_TOKEN")
+
+WAITING_VIDEO = 1
+WAITING_SRT = 2
+
+user_data = {}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "سڵاو! 👋\n\n"
+        "ئەم بۆتە ساب‌تایتڵی کوردی دەخاتە ناو ڤیدیۆکەت.\n\n"
+        "پێش هەموو شتێک ڤیدیۆکەت بنێرە 🎬"
+    )
+    return WAITING_VIDEO
+
+async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    if update.message.video:
+        file = update.message.video
+    elif update.message.document and update.message.document.mime_type and 'video' in update.message.document.mime_type:
+        file = update.message.document
+    else:
+        await update.message.reply_text("تکایە ڤیدیۆ بنێرە 🎬")
+        return WAITING_VIDEO
+
+    await update.message.reply_text("ڤیدیۆکەت وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
+
+    os.makedirs(f"/tmp/{user_id}", exist_ok=True)
+    video_file = await file.get_file()
+    video_path = f"/tmp/{user_id}/video.mp4"
+    await video_file.download_to_drive(video_path)
+    user_data[user_id] = {"video": video_path}
+
+    return WAITING_SRT
+
+async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    if not update.message.document:
+        await update.message.reply_text("تکایە فایلی SRT بنێرە 📄")
+        return WAITING_SRT
+
+    filename = update.message.document.file_name or ""
+    if not filename.endswith(".srt"):
+        await update.message.reply_text("تکایە فایلێکی SRT بنێرە 📄")
+        return WAITING_SRT
+
+    await update.message.reply_text("فایلەکەت وەرگرتم ✅\nکاردەکەم... چەند خولەک چاوەڕێ بکە ⏳")
+
+    srt_file = await update.message.document.get_file()
+    srt_path = f"/tmp/{user_id}/subtitle.srt"
+    await srt_file.download_to_drive(srt_path)
+
+    video_path = user_data[user_id]["video"]
+    output_path = f"/tmp/{user_id}/output.mp4"
+
+    # Kurdish font support with Arabic script
+    font_name = "Noto Naskh Arabic"
+    
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-vf", f"subtitles={srt_path}:force_style='FontName={font_name},FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2'",
+        "-c:a", "copy",
+        output_path
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+        if result.returncode == 0 and os.path.exists(output_path):
+            await update.message.reply_text("ئامادەیە! دەینێرم بۆت 🎉")
+            with open(output_path, "rb") as f:
+                await update.message.reply_video(
+                    video=f,
+                    caption="ساب‌تایتڵی کوردی هاردکۆد کراوە ✅"
+                )
+        else:
+            logger.error(f"FFmpeg error: {result.stderr}")
+            await update.message.reply_text("کێشەیەک هەبوو، دووبارە تاقی بکەرەوە ❌")
+
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("ڤیدیۆکەت زۆر درێژە، تاقی بکەرەوە بە ڤیدیۆی کووتر ❌")
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await update.message.reply_text("کێشەیەک هەبوو ❌")
+
+    # Cleanup
+    try:
+        os.remove(video_path)
+        os.remove(srt_path)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    except:
+        pass
+
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("هەڵوەشایەوە. /start بنووسە بۆ دەستپێکردنەوە")
+    return ConversationHandler.END
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start), MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
+        states={
+            WAITING_VIDEO: [MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
+            WAITING_SRT: [MessageHandler(filters.Document.ALL, receive_srt)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(conv_handler)
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
