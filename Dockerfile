@@ -1,12 +1,13 @@
-FROM jrottenberg/ffmpeg:4.4-alpine
+FROM python:3.11-slim
 
-RUN apk add --no-cache python3 py3-pip
+RUN apt-get update -o Acquire::Retries=3 && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip3 install -r requirements.txt --break-system-packages
+COPY . .
 
-COPY main.py .
+RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python3", "main.py"]
+CMD ["python", "main.py"]
