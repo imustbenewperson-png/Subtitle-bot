@@ -10,6 +10,6 @@ COPY . .
 
 RUN cp NRT-Reg.ttf /usr/share/fonts/ && fc-cache -fv
 
-RUN pip install python-telegram-bot==20.7
+RUN pip install python-telegram-bot==20.7 yt-dlp
 
 CMD ["python", "main.py"]
