@@ -18,29 +18,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "سڵاو! 👋\n\n"
         "ئەم بۆتە ساب‌تایتڵی کوردی دەخاتە ناو ڤیدیۆکەت.\n\n"
-        "پێش هەموو شتێک ڤیدیۆکەت بنێرە 🎬"
+        "پێش هەموو شتێک لینکی ڤیدیۆکەت بنێرە 🎬\n"
+        "(Google Drive, Telegram, هەر لینکێک)"
     )
     return WAITING_VIDEO
 
 async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    os.makedirs(f"/tmp/{user_id}", exist_ok=True)
+    video_path = f"/tmp/{user_id}/video.mp4"
 
-    if update.message.video:
+    # Check if it's a URL
+    if update.message.text and (update.message.text.startswith("http://") or update.message.text.startswith("https://")):
+        url = update.message.text.strip()
+        await update.message.reply_text("لینکەکەت وەرگرتم ✅\nدابەزێنم... چاوەڕێ بکە ⏳")
+        try:
+            result = subprocess.run(["wget", "-O", video_path, url], capture_output=True, timeout=600)
+            if result.returncode != 0:
+                await update.message.reply_text("نەمتوانی ڤیدیۆکە دابەزێنم ❌\nلینکەکە دووبارە تاقی بکەرەوە")
+                return WAITING_VIDEO
+        except Exception:
+            await update.message.reply_text("کێشەیەک هەبوو لە دابەزاندنەکەدا ❌")
+            return WAITING_VIDEO
+        await update.message.reply_text("ڤیدیۆکەت ئامادەیە ✅\nئێستا فایلی SRT بنێرە 📄")
+
+    # Direct video or document upload
+    elif update.message.video:
         file = update.message.video
+        await update.message.reply_text("ڤیدیۆکەت وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
+        video_file = await file.get_file()
+        await video_file.download_to_drive(video_path)
+
     elif update.message.document and update.message.document.mime_type and 'video' in update.message.document.mime_type:
         file = update.message.document
+        await update.message.reply_text("ڤیدیۆکەت وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
+        video_file = await file.get_file()
+        await video_file.download_to_drive(video_path)
+
     else:
-        await update.message.reply_text("تکایە ڤیدیۆ بنێرە 🎬")
+        await update.message.reply_text("تکایە لینکی ڤیدیۆ یان فایلی ڤیدیۆ بنێرە 🎬")
         return WAITING_VIDEO
 
-    await update.message.reply_text("ڤیدیۆکەت وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
-
-    os.makedirs(f"/tmp/{user_id}", exist_ok=True)
-    video_file = await file.get_file()
-    video_path = f"/tmp/{user_id}/video.mp4"
-    await video_file.download_to_drive(video_path)
     user_data[user_id] = {"video": video_path}
-
     return WAITING_SRT
 
 async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -63,19 +82,13 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     video_path = user_data[user_id]["video"]
     output_path = f"/tmp/{user_id}/output.mp4"
-
-    # Convert SRT to ASS format with Kurdish font
     ass_path = f"/tmp/{user_id}/subtitle.ass"
-    
-    # First convert SRT to ASS
-    convert_cmd = [
-        "ffmpeg", "-y",
-        "-i", srt_path,
-        ass_path
-    ]
+
+    # Convert SRT to ASS
+    convert_cmd = ["ffmpeg", "-y", "-i", srt_path, ass_path]
     subprocess.run(convert_cmd, capture_output=True)
-    
-    # Modify ASS file to use our font
+
+    # Modify ASS to use Kurdish font
     if os.path.exists(ass_path):
         with open(ass_path, 'r', encoding='utf-8') as f:
             ass_content = f.read()
@@ -83,7 +96,7 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ass_content = ass_content.replace('Fontname: Arial', 'Fontname: NRT Reg')
         with open(ass_path, 'w', encoding='utf-8') as f:
             f.write(ass_content)
-    
+
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
@@ -93,13 +106,14 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if result.returncode == 0 and os.path.exists(output_path):
             await update.message.reply_text("ئامادەیە! دەینێرم بۆت 🎉")
             with open(output_path, "rb") as f:
-                await update.message.reply_video(
-                    video=f,
+                await update.message.reply_document(
+                    document=f,
+                    filename="output_kurdish.mp4",
                     caption="ساب‌تایتڵی کوردی هاردکۆد کراوە ✅"
                 )
         else:
@@ -107,7 +121,7 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("کێشەیەک هەبوو، دووبارە تاقی بکەرەوە ❌")
 
     except subprocess.TimeoutExpired:
-        await update.message.reply_text("ڤیدیۆکەت زۆر درێژە، تاقی بکەرەوە بە ڤیدیۆی کووتر ❌")
+        await update.message.reply_text("ڤیدیۆکەت زۆر درێژە ❌")
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text("کێشەیەک هەبوو ❌")
@@ -116,6 +130,8 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         os.remove(video_path)
         os.remove(srt_path)
+        if os.path.exists(ass_path):
+            os.remove(ass_path)
         if os.path.exists(output_path):
             os.remove(output_path)
     except:
@@ -131,9 +147,12 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start), MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(filters.TEXT | filters.VIDEO | filters.Document.ALL, receive_video)
+        ],
         states={
-            WAITING_VIDEO: [MessageHandler(filters.VIDEO | filters.Document.ALL, receive_video)],
+            WAITING_VIDEO: [MessageHandler(filters.TEXT | filters.VIDEO | filters.Document.ALL, receive_video)],
             WAITING_SRT: [MessageHandler(filters.Document.ALL, receive_srt)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
