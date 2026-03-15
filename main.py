@@ -22,7 +22,17 @@ WAITING_SPEAKER_NUMBER = 6
 
 user_data = {}
 
-def to_srt_time(seconds):
+def to_srt_time(ms):
+    """Convert milliseconds to SRT time format"""
+    seconds = ms / 1000
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms_part = int(ms % 1000)
+    return f"{h:02}:{m:02}:{s:02},{ms_part:03}"
+
+def to_srt_time_sec(seconds):
+    """Convert seconds to SRT time format"""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
@@ -50,15 +60,83 @@ def translate_text(text, target_lang):
             timeout=30
         )
         if response.status_code == 200:
-            translated = response.json()["choices"][0]["message"]["content"].strip()
-            logger.info(f"Translated ({target_lang}): {text[:40]} -> {translated[:40]}")
-            return translated
-        else:
-            logger.error(f"Translation error: {response.status_code} {response.text}")
-            return text
-    except Exception as e:
-        logger.error(f"Translation exception: {e}")
+            return response.json()["choices"][0]["message"]["content"].strip()
         return text
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        return text
+
+def assemblyai_transcribe_with_speakers(audio_path, num_speakers):
+    """
+    Use AssemblyAI v3 API for speaker diarization.
+    Returns list of utterances with speaker, start_ms, end_ms, text.
+    """
+    headers = {
+        "Authorization": ASSEMBLYAI_KEY,
+        "Content-Type": "application/json"
+    }
+
+    # Step 1: Upload file
+    with open(audio_path, "rb") as f:
+        upload_resp = requests.post(
+            "https://api.assemblyai.com/v2/upload",
+            headers={"Authorization": ASSEMBLYAI_KEY},
+            data=f,
+            timeout=180
+        )
+    if upload_resp.status_code != 200:
+        raise Exception(f"Upload failed: {upload_resp.text}")
+    audio_url = upload_resp.json()["upload_url"]
+
+    # Step 2: Submit with v3 config
+    payload = {
+        "audio_url": audio_url,
+        "speaker_labels": True,
+        "speakers_expected": num_speakers,
+        "speech_model": "best",
+        "punctuate": True,
+        "format_text": True
+    }
+
+    submit_resp = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        headers=headers,
+        json=payload,
+        timeout=30
+    )
+
+    if submit_resp.status_code != 200:
+        raise Exception(f"Submit failed: {submit_resp.text}")
+
+    job = submit_resp.json()
+    if "id" not in job:
+        raise Exception(f"No ID: {job}")
+    transcript_id = job["id"]
+
+    # Step 3: Poll with timeout
+    max_wait = 600  # 10 minutes
+    waited = 0
+    while waited < max_wait:
+        time.sleep(5)
+        waited += 5
+        poll_resp = requests.get(
+            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+            headers={"Authorization": ASSEMBLYAI_KEY},
+            timeout=30
+        )
+        result = poll_resp.json()
+        status = result.get("status")
+        logger.info(f"AssemblyAI status: {status} ({waited}s)")
+
+        if status == "completed":
+            utterances = result.get("utterances", [])
+            if not utterances:
+                raise Exception("No utterances returned")
+            return utterances
+        elif status == "error":
+            raise Exception(f"Transcription error: {result.get('error')}")
+
+    raise Exception("Timeout waiting for transcription")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -78,59 +156,153 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    uid = query.from_user.id
     if query.data == "make_srt_kurdish":
-        user_data[query.from_user.id] = {"mode": "make_srt_kurdish"}
-        await query.edit_message_text("باشە! 🎬\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
+        user_data[uid] = {"mode": "make_srt_kurdish"}
+        await query.edit_message_text("باشە! 🎬\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
         return WAITING_VIDEO_FOR_SRT
-
     elif query.data == "make_srt_english":
-        user_data[query.from_user.id] = {"mode": "make_srt_english"}
-        await query.edit_message_text("باشە! 🌍\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
+        user_data[uid] = {"mode": "make_srt_english"}
+        await query.edit_message_text("باشە! 🌍\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
         return WAITING_VIDEO_FOR_SRT
-
     elif query.data == "speaker_extract":
-        user_data[query.from_user.id] = {"mode": "speaker_extract"}
-        await query.edit_message_text("باشە! 🎤\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
+        user_data[uid] = {"mode": "speaker_extract"}
+        await query.edit_message_text("باشە! 🎤\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
         return WAITING_VIDEO_FOR_SPEAKER
-
     elif query.data == "burn_srt":
-        user_data[query.from_user.id] = {"mode": "burn_srt"}
-        await query.edit_message_text("باشە! 🔥\n\nلینکی ڤیدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
+        user_data[uid] = {"mode": "burn_srt"}
+        await query.edit_message_text("باشە! 🔥\n\nلینکی ڤیدیۆکەت بنێرە\nیان فایلەکە ڕاستەوخۆ بنێرە 📁")
         return WAITING_VIDEO_FOR_BURN
 
-async def download_file(url, path):
+async def download_media(update, path):
+    """Download from URL or Telegram file"""
+    msg = update.message
+    if msg.text and msg.text.startswith("http"):
+        result = subprocess.run(
+            ["yt-dlp", "-o", path, "--no-playlist", msg.text.strip()],
+            capture_output=True, timeout=600
+        )
+        if result.returncode != 0:
+            result2 = subprocess.run(["wget", "-O", path, msg.text.strip()], capture_output=True, timeout=600)
+            return result2.returncode == 0
+        return True
+    elif msg.video or msg.document or msg.audio or msg.voice:
+        file_obj = msg.video or msg.document or msg.audio or msg.voice
+        size = getattr(file_obj, "file_size", 0) or 0
+        if size > 50 * 1024 * 1024:
+            return "too_big"
+        tg_file = await file_obj.get_file()
+        await tg_file.download_to_drive(path)
+        return True
+    return False
+
+async def extract_audio(video_path, audio_path):
+    """Extract audio from video"""
+    result = subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-vn", "-ar", "16000", "-ac", "1", "-b:a", "64k",
+        audio_path
+    ], capture_output=True)
+    return os.path.exists(audio_path)
+
+async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    os.makedirs(f"/tmp/{user_id}", exist_ok=True)
+    video_path = f"/tmp/{user_id}/input_video"
+    mode = user_data.get(user_id, {}).get("mode", "make_srt_kurdish")
+
+    await update.message.reply_text("وەرگرتم... ⏳")
+    dl = await download_media(update, video_path)
+    if dl == "too_big":
+        await update.message.reply_text("فایلەکەت زۆر گەورەیە\nتکایە لینک بنێرە")
+        return WAITING_VIDEO_FOR_SRT
+    if not dl:
+        await update.message.reply_text("تکایە فایل یان لینک بنێرە 📁")
+        return WAITING_VIDEO_FOR_SRT
+
+    await update.message.reply_text("دەنگەکە دەردەهێنم... ⏳")
+    audio_path = f"/tmp/{user_id}/audio.mp3"
+    if not await extract_audio(video_path, audio_path):
+        await update.message.reply_text("کێشەیەک هەبوو لە دەرهێنانی دەنگدا")
+        return WAITING_VIDEO_FOR_SRT
+
+    await update.message.reply_text("Whisper AI گوێ دەگرێت... ⏳")
+
     try:
-        result = subprocess.run(["yt-dlp", "-o", path, "--no-playlist", url], capture_output=True, timeout=600)
-        if result.returncode == 0:
-            return True
-        result2 = subprocess.run(["wget", "-O", path, url], capture_output=True, timeout=600)
-        return result2.returncode == 0
-    except:
-        return False
+        with open(audio_path, "rb") as f:
+            response = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": ("audio.mp3", f, "audio/mpeg")},
+                data={"model": "whisper-large-v3", "response_format": "verbose_json", "timestamp_granularities[]": "segment"},
+                timeout=120
+            )
+
+        if response.status_code != 200:
+            await update.message.reply_text("کێشەیەک هەبوو لە Whisper")
+            return WAITING_VIDEO_FOR_SRT
+
+        data = response.json()
+        segments = data.get("segments", [])
+        detected_lang = data.get("language", "نازانرێت")
+
+        if not segments:
+            await update.message.reply_text("هیچ دەنگێک نەدۆزرایەوە")
+            return WAITING_VIDEO_FOR_SRT
+
+        if mode == "make_srt_kurdish":
+            await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ کوردی سورانی... ⏳")
+            fname = "kurdish_subtitles.srt"
+            caption_end = "وەرگێڕاوە بۆ کوردی سورانی"
+            target = "kurdish"
+        else:
+            await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ ئینگلیزی... ⏳")
+            fname = "english_subtitles.srt"
+            caption_end = "وەرگێڕاوە بۆ ئینگلیزی"
+            target = "english"
+
+        srt_content = ""
+        for i, seg in enumerate(segments, 1):
+            translated = translate_text(seg["text"].strip(), target)
+            srt_content += f"{i}\n{to_srt_time_sec(seg['start'])} --> {to_srt_time_sec(seg['end'])}\n{translated}\n\n"
+
+        srt_path = f"/tmp/{user_id}/{fname}"
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(srt_content)
+
+        await update.message.reply_text("ئامادەیە! 🎉")
+        with open(srt_path, "rb") as f:
+            await update.message.reply_document(
+                document=f, filename=fname,
+                caption=f"✅ {len(segments)} رستە\nزمانی ئەسڵی: {detected_lang}\n{caption_end}"
+            )
+    except Exception as e:
+        logger.error(f"SRT error: {e}")
+        await update.message.reply_text("کێشەیەک هەبوو")
+
+    for p in [video_path, audio_path]:
+        try:
+            if os.path.exists(p): os.remove(p)
+        except: pass
+
+    return ConversationHandler.END
 
 async def receive_video_for_speaker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     os.makedirs(f"/tmp/{user_id}", exist_ok=True)
     video_path = f"/tmp/{user_id}/input_video"
 
-    if update.message.text and update.message.text.startswith("http"):
-        url = update.message.text.strip()
-        await update.message.reply_text("دابەزێنم... ⏳")
-        success = await download_file(url, video_path)
-        if not success:
-            await update.message.reply_text("نەمتوانی دابەزێنم ❌")
-            return WAITING_VIDEO_FOR_SPEAKER
-    elif update.message.video or update.message.document or update.message.audio or update.message.voice:
-        file = update.message.video or update.message.document or update.message.audio or update.message.voice
-        await update.message.reply_text("وەرگرتم ⏳")
-        tg_file = await file.get_file()
-        await tg_file.download_to_drive(video_path)
-    else:
+    await update.message.reply_text("وەرگرتم... ⏳")
+    dl = await download_media(update, video_path)
+    if dl == "too_big":
+        await update.message.reply_text("فایلەکەت زۆر گەورەیە\nتکایە لینک بنێرە")
+        return WAITING_VIDEO_FOR_SPEAKER
+    if not dl:
         await update.message.reply_text("تکایە فایل یان لینک بنێرە 📁")
         return WAITING_VIDEO_FOR_SPEAKER
 
     user_data[user_id]["video"] = video_path
-    await update.message.reply_text("چەند دەنگ لە ڤیدیۆکەدا قسە دەکەن؟\nنووسە: 2، 3، 4...")
+    await update.message.reply_text("چەند دەنگ لە ڤیدیۆکەدا قسە دەکەن؟\nنووسە ژمارە (وەک: 2، 3، 4)")
     return WAITING_SPEAKER_NUMBER
 
 async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -146,92 +318,34 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
         return WAITING_SPEAKER_NUMBER
 
     video_path = user_data[user_id]["video"]
-    await update.message.reply_text(f"باشە! {num_speakers} دەنگ — دەنگەکە دەردەهێنم... ⏳")
+    await update.message.reply_text(f"باشە! {num_speakers} دەنگ\nدەنگەکە دەردەهێنم... ⏳")
 
-    # Extract audio
-    audio_path = f"/tmp/{user_id}/audio.mp3"
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-vn", "-ar", "16000", "-ac", "1", "-b:a", "64k",
-        audio_path
-    ], capture_output=True)
-
-    if not os.path.exists(audio_path):
-        await update.message.reply_text("کێشەیەک هەبوو ❌")
+    audio_path = f"/tmp/{user_id}/audio_speaker.mp3"
+    if not await extract_audio(video_path, audio_path):
+        await update.message.reply_text("کێشەیەک هەبوو لە دەرهێنانی دەنگدا")
         return ConversationHandler.END
 
-    await update.message.reply_text("AssemblyAI دەنگەکان جیا دەکاتەوە... ⏳\nئەمە چەند خولەک کات دەبرێت")
+    await update.message.reply_text("AssemblyAI دەنگەکان جیا دەکاتەوە...\nئەمە چەند خولەک کات دەبرێت ⏳")
 
     try:
-        headers = {"authorization": ASSEMBLYAI_KEY, "content-type": "application/json"}
-
-        # Upload audio
-        with open(audio_path, "rb") as f:
-            upload_response = requests.post(
-                "https://api.assemblyai.com/v2/upload",
-                headers={"authorization": ASSEMBLYAI_KEY},
-                data=f,
-                timeout=120
-            )
-
-        logger.info(f"Upload response: {upload_response.status_code} {upload_response.text[:200]}")
-
-        if upload_response.status_code != 200:
-            await update.message.reply_text("کێشەیەک هەبوو لە بارکردندا")
-            return ConversationHandler.END
-
-        audio_url = upload_response.json()["upload_url"]
-
-        # Submit transcription
-        transcript_response = requests.post(
-            "https://api.assemblyai.com/v2/transcript",
-            headers=headers,
-            json={
-                "audio_url": audio_url,
-                "speaker_labels": True,
-                "speakers_expected": num_speakers,
-                "speech_models": ["universal-2"]
-            },
-            timeout=30
-        )
-
-        logger.info(f"Transcript response: {transcript_response.status_code} {transcript_response.text[:200]}")
-
-        tr_json = transcript_response.json()
-        if "id" not in tr_json:
-            err = tr_json.get('error', '')
-            await update.message.reply_text(f"کێشەیەک هەبوو: {err}")
-            return ConversationHandler.END
-
-        transcript_id = tr_json["id"]
-
-        # Poll for result
-        while True:
-            time.sleep(5)
-            result_response = requests.get(
-                f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-                headers={"authorization": ASSEMBLYAI_KEY},
-                timeout=30
-            )
-            result = result_response.json()
-            logger.info(f"Poll status: {result.get('status')}")
-
-            if result["status"] == "completed":
-                break
-            elif result["status"] == "error":
-                err = result.get('error', '')
-                await update.message.reply_text(f"کێشەیەک هەبوو: {err}")
-                return ConversationHandler.END
+        utterances = assemblyai_transcribe_with_speakers(audio_path, num_speakers)
 
         # Get unique speakers
-        utterances = result.get("utterances", [])
-        speakers = list(set([u["speaker"] for u in utterances]))
-        speakers.sort()
+        speakers = sorted(set(u["speaker"] for u in utterances))
 
-        # Create keyboard for speaker selection
+        # Store transcript for later use
+        user_data[user_id]["utterances"] = utterances
+        user_data[user_id]["transcript_ready"] = True
+
+        # Show speaker selection
         keyboard = []
         for sp in speakers:
-            keyboard.append([InlineKeyboardButton(f"🎤 دەنگی {sp}", callback_data=f"sp_{transcript_id}_{sp}_{user_id}")])
+            sp_utterances = [u for u in utterances if u["speaker"] == sp]
+            total_words = sum(len(u["text"].split()) for u in sp_utterances)
+            keyboard.append([InlineKeyboardButton(
+                f"🎤 دەنگی {sp} ({len(sp_utterances)} رستە، {total_words} وشە)",
+                callback_data=f"sp_{sp}_{user_id}"
+            )])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
@@ -240,8 +354,13 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     except Exception as e:
-        logger.error(f"AssemblyAI error: {e}")
-        await update.message.reply_text("کێشەیەک هەبوو ❌")
+        logger.error(f"Speaker diarization error: {e}")
+        await update.message.reply_text(f"کێشەیەک هەبوو: {str(e)[:100]}")
+
+    for p in [video_path, audio_path]:
+        try:
+            if os.path.exists(p): os.remove(p)
+        except: pass
 
     return ConversationHandler.END
 
@@ -250,42 +369,39 @@ async def speaker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     parts = query.data.split("_")
-    transcript_id = parts[1]
-    speaker = parts[2]
-    user_id = int(parts[3])
+    speaker = parts[1]
+    user_id = int(parts[2])
+
+    utterances = user_data.get(user_id, {}).get("utterances", [])
+    if not utterances:
+        await query.edit_message_text("کێشەیەک هەبوو — دووبارە /start بنووسە")
+        return
 
     await query.edit_message_text(f"دەنگی {speaker} دەردەهێنم... ⏳")
 
     try:
-        result_response = requests.get(
-            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-            headers={"authorization": ASSEMBLYAI_KEY},
-            timeout=30
-        )
-        result = result_response.json()
-        utterances = result.get("utterances", [])
-
-        # Filter by speaker
         speaker_utterances = [u for u in utterances if u["speaker"] == speaker]
 
-        # Create SRT
         srt_content = ""
         for i, utt in enumerate(speaker_utterances, 1):
-            start = utt["start"] / 1000
-            end = utt["end"] / 1000
-            text = utt["text"]
-            srt_content += f"{i}\n{to_srt_time(start)} --> {to_srt_time(end)}\n{text}\n\n"
+            start_ms = utt["start"]
+            end_ms = utt["end"]
+            text = utt["text"].strip()
+            srt_content += f"{i}\n{to_srt_time(start_ms)} --> {to_srt_time(end_ms)}\n{text}\n\n"
 
         srt_path = f"/tmp/{user_id}/speaker_{speaker}.srt"
         with open(srt_path, "w", encoding="utf-8") as f:
             f.write(srt_content)
+
+        duration_sec = (speaker_utterances[-1]["end"] - speaker_utterances[0]["start"]) / 1000
+        duration_min = int(duration_sec // 60)
 
         await query.message.reply_text("ئامادەیە! 🎉")
         with open(srt_path, "rb") as f:
             await query.message.reply_document(
                 document=f,
                 filename=f"speaker_{speaker}.srt",
-                caption=f"✅ دەنگی {speaker}\n{len(speaker_utterances)} رستە"
+                caption=f"🎤 دەنگی {speaker}\n✅ {len(speaker_utterances)} رستە\n⏱ نزیکەی {duration_min} خولەک قسەی کردووە"
             )
 
         if os.path.exists(srt_path):
@@ -293,137 +409,23 @@ async def speaker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Speaker extract error: {e}")
-        await query.message.reply_text("کێشەیەک هەبوو ❌")
-
-async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    os.makedirs(f"/tmp/{user_id}", exist_ok=True)
-    video_path = f"/tmp/{user_id}/input_video"
-    mode = user_data.get(user_id, {}).get("mode", "make_srt_kurdish")
-
-    if update.message.text and update.message.text.startswith("http"):
-        url = update.message.text.strip()
-        await update.message.reply_text("دابەزێنم... ⏳")
-        success = await download_file(url, video_path)
-        if not success:
-            await update.message.reply_text("نەمتوانی دابەزێنم ❌")
-            return WAITING_VIDEO_FOR_SRT
-    elif update.message.video or update.message.document or update.message.audio or update.message.voice:
-        file = update.message.video or update.message.document or update.message.audio or update.message.voice
-        await update.message.reply_text("وەرگرتم ⏳")
-        tg_file = await file.get_file()
-        await tg_file.download_to_drive(video_path)
-    else:
-        await update.message.reply_text("تکایە فایل یان لینک بنێرە 📁")
-        return WAITING_VIDEO_FOR_SRT
-
-    await update.message.reply_text("دەنگەکە دەردەهێنم... ⏳")
-
-    audio_path = f"/tmp/{user_id}/audio.mp3"
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-vn", "-ar", "16000", "-ac", "1", "-b:a", "64k",
-        audio_path
-    ], capture_output=True)
-
-    if not os.path.exists(audio_path):
-        await update.message.reply_text("کێشەیەک هەبوو ❌")
-        return WAITING_VIDEO_FOR_SRT
-
-    await update.message.reply_text("Whisper گوێ دەگرێت... ⏳")
-
-    try:
-        with open(audio_path, "rb") as f:
-            response = requests.post(
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                files={"file": ("audio.mp3", f, "audio/mpeg")},
-                data={
-                    "model": "whisper-large-v3",
-                    "response_format": "verbose_json",
-                    "timestamp_granularities[]": "segment"
-                },
-                timeout=120
-            )
-
-        if response.status_code != 200:
-            await update.message.reply_text("کێشەیەک هەبوو ❌")
-            return WAITING_VIDEO_FOR_SRT
-
-        data = response.json()
-        segments = data.get("segments", [])
-        detected_lang = data.get("language", "نازانرێت")
-
-        if not segments:
-            await update.message.reply_text("هیچ دەنگێک نەدۆزرایەوە ❌")
-            return WAITING_VIDEO_FOR_SRT
-
-        if mode == "make_srt_kurdish":
-            target = "kurdish"
-            await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ کوردی سورانی... ⏳")
-            fname = "kurdish_subtitles.srt"
-            caption_end = "وەرگێڕاوە بۆ: کوردی سورانی"
-        else:
-            target = "english"
-            await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ ئینگلیزی... ⏳")
-            fname = "english_subtitles.srt"
-            caption_end = "وەرگێڕاوە بۆ: ئینگلیزی"
-
-        srt_content = ""
-        for i, seg in enumerate(segments, 1):
-            start = seg["start"]
-            end = seg["end"]
-            original_text = seg["text"].strip()
-            translated_text = translate_text(original_text, target)
-            srt_content += f"{i}\n{to_srt_time(start)} --> {to_srt_time(end)}\n{translated_text}\n\n"
-
-        srt_path = f"/tmp/{user_id}/{fname}"
-        with open(srt_path, "w", encoding="utf-8") as f:
-            f.write(srt_content)
-
-        await update.message.reply_text("ئامادەیە! 🎉")
-        with open(srt_path, "rb") as f:
-            await update.message.reply_document(
-                document=f,
-                filename=fname,
-                caption=f"✅ {len(segments)} رستە\nزمانی ئەسڵی: {detected_lang}\n{caption_end}"
-            )
-
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text("کێشەیەک هەبوو ❌")
-
-    for p in [video_path, audio_path]:
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except:
-            pass
-
-    return ConversationHandler.END
+        await query.message.reply_text("کێشەیەک هەبوو")
 
 async def receive_video_for_burn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     os.makedirs(f"/tmp/{user_id}", exist_ok=True)
     video_path = f"/tmp/{user_id}/video.mp4"
 
-    if update.message.text and update.message.text.startswith("http"):
-        url = update.message.text.strip()
-        await update.message.reply_text("دابەزێنم... ⏳")
-        success = await download_file(url, video_path)
-        if not success:
-            await update.message.reply_text("نەمتوانی دابەزێنم ❌")
-            return WAITING_VIDEO_FOR_BURN
-        await update.message.reply_text("ڤیدیۆکەت ئامادەیە ✅\nئێستا فایلی SRT بنێرە 📄")
-    elif update.message.video or (update.message.document and 'video' in (update.message.document.mime_type or '')):
-        file = update.message.video or update.message.document
-        await update.message.reply_text("وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
-        tg_file = await file.get_file()
-        await tg_file.download_to_drive(video_path)
-    else:
+    await update.message.reply_text("وەرگرتم... ⏳")
+    dl = await download_media(update, video_path)
+    if dl == "too_big":
+        await update.message.reply_text("فایلەکەت زۆر گەورەیە\nتکایە لینک بنێرە")
+        return WAITING_VIDEO_FOR_BURN
+    if not dl:
         await update.message.reply_text("تکایە فایل یان لینک بنێرە 📁")
         return WAITING_VIDEO_FOR_BURN
 
+    await update.message.reply_text("ڤیدیۆکەت ئامادەیە ✅\nئێستا فایلی SRT بنێرە 📄")
     user_data[user_id]["video"] = video_path
     return WAITING_SRT
 
@@ -447,19 +449,16 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subprocess.run(["ffmpeg", "-y", "-i", srt_path, ass_path], capture_output=True)
 
     if os.path.exists(ass_path):
-        with open(ass_path, 'r', encoding='utf-8') as f:
-            ass_content = f.read()
-        ass_content = ass_content.replace('Style: Default,Arial', 'Style: Default,NRT Reg')
-        ass_content = ass_content.replace('Fontname: Arial', 'Fontname: NRT Reg')
-        with open(ass_path, 'w', encoding='utf-8') as f:
-            f.write(ass_content)
+        with open(ass_path, "r", encoding="utf-8") as f:
+            ass = f.read()
+        ass = ass.replace("Style: Default,Arial", "Style: Default,NRT Reg")
+        ass = ass.replace("Fontname: Arial", "Fontname: NRT Reg")
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass)
 
-    cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vf", f"scale=640:360,ass={ass_path}:fontsdir=/app",
-        "-preset", "ultrafast", "-crf", "35",
-        "-c:a", "copy", output_path
-    ]
+    cmd = ["ffmpeg", "-y", "-i", video_path,
+           "-vf", f"scale=640:360,ass={ass_path}:fontsdir=/app",
+           "-preset", "ultrafast", "-crf", "35", "-c:a", "copy", output_path]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -467,30 +466,27 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ئامادەیە! 🎉")
             with open(output_path, "rb") as f:
                 await update.message.reply_document(
-                    document=f,
-                    filename="output_kurdish.mp4",
+                    document=f, filename="output_kurdish.mp4",
                     caption="ساب‌تایتڵی کوردی هاردکۆد کراوە ✅"
                 )
         else:
-            logger.error(f"FFmpeg error: {result.stderr}")
-            await update.message.reply_text("کێشەیەک هەبوو ❌")
+            logger.error(f"FFmpeg: {result.stderr[-500:]}")
+            await update.message.reply_text("کێشەیەک هەبوو")
     except subprocess.TimeoutExpired:
-        await update.message.reply_text("ڤیدیۆکەت زۆر درێژە ❌")
+        await update.message.reply_text("ڤیدیۆکەت زۆر درێژە")
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text("کێشەیەک هەبوو ❌")
+        logger.error(f"Burn error: {e}")
+        await update.message.reply_text("کێشەیەک هەبوو")
 
     for p in [video_path, srt_path, ass_path, output_path]:
         try:
-            if os.path.exists(p):
-                os.remove(p)
-        except:
-            pass
+            if os.path.exists(p): os.remove(p)
+        except: pass
 
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("هەڵوەشایەوە ❌\n/start بنووسە بۆ دەستپێکردنەوە")
+    await update.message.reply_text("هەڵوەشایەوە\n/start بنووسە بۆ دەستپێکردنەوە")
     return ConversationHandler.END
 
 def main():
