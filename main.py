@@ -19,7 +19,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "سڵاو! 👋\n\n"
         "ئەم بۆتە ساب‌تایتڵی کوردی دەخاتە ناو ڤیدیۆکەت.\n\n"
         "پێش هەموو شتێک لینکی ڤیدیۆکەت بنێرە 🎬\n"
-        "(Google Drive, Telegram, هەر لینکێک)"
+        "(Google Drive, YouTube, Telegram, هەر لینکێک)"
     )
     return WAITING_VIDEO
 
@@ -28,21 +28,26 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.makedirs(f"/tmp/{user_id}", exist_ok=True)
     video_path = f"/tmp/{user_id}/video.mp4"
 
-    # Check if it's a URL
     if update.message.text and (update.message.text.startswith("http://") or update.message.text.startswith("https://")):
         url = update.message.text.strip()
         await update.message.reply_text("لینکەکەت وەرگرتم ✅\nدابەزێنم... چاوەڕێ بکە ⏳")
         try:
-            result = subprocess.run(["wget", "-O", video_path, url], capture_output=True, timeout=600)
+            result = subprocess.run(
+                ["yt-dlp", "-o", video_path, "--no-playlist", url],
+                capture_output=True, timeout=600
+            )
             if result.returncode != 0:
-                await update.message.reply_text("نەمتوانی ڤیدیۆکە دابەزێنم ❌\nلینکەکە دووبارە تاقی بکەرەوە")
-                return WAITING_VIDEO
-        except Exception:
+                # Try wget as fallback
+                result2 = subprocess.run(["wget", "-O", video_path, url], capture_output=True, timeout=600)
+                if result2.returncode != 0:
+                    await update.message.reply_text("نەمتوانی ڤیدیۆکە دابەزێنم ❌\nلینکەکە دووبارە تاقی بکەرەوە")
+                    return WAITING_VIDEO
+        except Exception as e:
+            logger.error(f"Download error: {e}")
             await update.message.reply_text("کێشەیەک هەبوو لە دابەزاندنەکەدا ❌")
             return WAITING_VIDEO
         await update.message.reply_text("ڤیدیۆکەت ئامادەیە ✅\nئێستا فایلی SRT بنێرە 📄")
 
-    # Direct video or document upload
     elif update.message.video:
         file = update.message.video
         await update.message.reply_text("ڤیدیۆکەت وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
@@ -84,11 +89,9 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output_path = f"/tmp/{user_id}/output.mp4"
     ass_path = f"/tmp/{user_id}/subtitle.ass"
 
-    # Convert SRT to ASS
     convert_cmd = ["ffmpeg", "-y", "-i", srt_path, ass_path]
     subprocess.run(convert_cmd, capture_output=True)
 
-    # Modify ASS to use Kurdish font
     if os.path.exists(ass_path):
         with open(ass_path, 'r', encoding='utf-8') as f:
             ass_content = f.read()
@@ -126,7 +129,6 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {e}")
         await update.message.reply_text("کێشەیەک هەبوو ❌")
 
-    # Cleanup
     try:
         os.remove(video_path)
         os.remove(srt_path)
