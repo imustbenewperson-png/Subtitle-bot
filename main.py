@@ -88,12 +88,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "make_srt_raw":
         user_data[query.from_user.id] = {"mode": "make_srt_raw"}
         await query.edit_message_text(
-            "باشە! 📝
-
-لینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە
-(Google Drive, YouTube, هەر لینکێک)
-
-یان فایلەکە ڕاستەوخۆ بنێرە 📁"
+            "باشە! 📝\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁"
         )
         return WAITING_VIDEO_FOR_SRT
 
