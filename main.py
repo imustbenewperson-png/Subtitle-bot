@@ -19,6 +19,7 @@ WAITING_VIDEO_FOR_BURN = 3
 WAITING_SRT = 4
 WAITING_VIDEO_FOR_SPEAKER = 5
 WAITING_SPEAKER_NUMBER = 6
+WAITING_SRT_FOR_TRANSLATE = 7
 
 user_data = {}
 
@@ -143,6 +144,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎬 SRT کوردی دروست بکە", callback_data="make_srt_kurdish")],
         [InlineKeyboardButton("🌍 SRT وەرگێران بۆ ئینگلیزی", callback_data="make_srt_english")],
         [InlineKeyboardButton("🎤 دەنگی کەسێک دەربێنە", callback_data="speaker_extract")],
+        [InlineKeyboardButton("📝 فایلی SRT وەرگێرە بۆ کوردی", callback_data="translate_srt_kurdish")],
+        [InlineKeyboardButton("🔤 فایلی SRT وەرگێرە بۆ ئینگلیزی", callback_data="translate_srt_english")],
         [InlineKeyboardButton("🔥 SRT بخەرە ناو ڤیدیۆ", callback_data="burn_srt")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -485,6 +488,80 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+async def receive_srt_for_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    mode = user_data.get(user_id, {}).get("mode", "translate_srt_kurdish")
+
+    if not update.message.document or not (update.message.document.file_name or "").endswith(".srt"):
+        await update.message.reply_text("تکایە فایلێکی SRT بنێرە 📄")
+        return WAITING_SRT_FOR_TRANSLATE
+
+    await update.message.reply_text("فایلەکەت وەرگرتم... وەردەگێرم ⏳")
+
+    srt_file = await update.message.document.get_file()
+    srt_path = f"/tmp/{user_id}/input_translate.srt"
+    await srt_file.download_to_drive(srt_path)
+
+    try:
+        with open(srt_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        target = "kurdish" if mode == "translate_srt_kurdish" else "english"
+        target_label = "کوردی سورانی" if target == "kurdish" else "ئینگلیزی"
+
+        output_lines = []
+        i = 0
+        translated_count = 0
+        while i < len(lines):
+            line = lines[i]
+            # SRT index line (number only)
+            if line.strip().isdigit():
+                output_lines.append(line)
+                i += 1
+                # Timecode line
+                if i < len(lines) and "-->" in lines[i]:
+                    output_lines.append(lines[i])
+                    i += 1
+                    # Text lines (until empty line)
+                    text_lines = []
+                    while i < len(lines) and lines[i].strip() != "":
+                        text_lines.append(lines[i].strip())
+                        i += 1
+                    if text_lines:
+                        original_text = " ".join(text_lines)
+                        translated = translate_text(original_text, target)
+                        output_lines.append(translated + "\n")
+                        translated_count += 1
+                    # Empty line
+                    output_lines.append("\n")
+            else:
+                output_lines.append(line)
+                i += 1
+
+        fname = f"kurdish_translated.srt" if target == "kurdish" else "english_translated.srt"
+        out_path = f"/tmp/{user_id}/{fname}"
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.writelines(output_lines)
+
+        await update.message.reply_text("ئامادەیە! 🎉")
+        with open(out_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=fname,
+                caption=f"✅ {translated_count} رستە وەرگێڕدرا\nوەرگێڕاوە بۆ: {target_label}"
+            )
+
+        for p in [srt_path, out_path]:
+            try:
+                if os.path.exists(p): os.remove(p)
+            except: pass
+
+    except Exception as e:
+        logger.error(f"SRT translate error: {e}")
+        await update.message.reply_text("کێشەیەک هەبوو")
+
+    return ConversationHandler.END
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("هەڵوەشایەوە\n/start بنووسە بۆ دەستپێکردنەوە")
     return ConversationHandler.END
@@ -495,12 +572,13 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            WAITING_CHOICE: [CallbackQueryHandler(button_handler, pattern="^(make_srt_kurdish|make_srt_english|speaker_extract|burn_srt)$")],
+            WAITING_CHOICE: [CallbackQueryHandler(button_handler, pattern="^(make_srt_kurdish|make_srt_english|speaker_extract|translate_srt_kurdish|translate_srt_english|burn_srt)$")],
             WAITING_VIDEO_FOR_SRT: [MessageHandler(filters.ALL, receive_video_for_srt)],
             WAITING_VIDEO_FOR_BURN: [MessageHandler(filters.ALL, receive_video_for_burn)],
             WAITING_VIDEO_FOR_SPEAKER: [MessageHandler(filters.ALL, receive_video_for_speaker)],
             WAITING_SPEAKER_NUMBER: [MessageHandler(filters.TEXT, receive_speaker_number)],
             WAITING_SRT: [MessageHandler(filters.Document.ALL, receive_srt)],
+            WAITING_SRT_FOR_TRANSLATE: [MessageHandler(filters.Document.ALL, receive_srt_for_translate)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
