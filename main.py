@@ -37,7 +37,6 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 capture_output=True, timeout=600
             )
             if result.returncode != 0:
-                # Try wget as fallback
                 result2 = subprocess.run(["wget", "-O", video_path, url], capture_output=True, timeout=600)
                 if result2.returncode != 0:
                     await update.message.reply_text("نەمتوانی ڤیدیۆکە دابەزێنم ❌\nلینکەکە دووبارە تاقی بکەرەوە")
@@ -103,9 +102,9 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-vf", f"ass={ass_path}:fontsdir=/app",
+        "-vf", f"scale=640:360,ass={ass_path}:fontsdir=/app",
         "-preset", "ultrafast",
-        "-crf", "28",
+        "-crf", "35",
         "-c:a", "copy",
         output_path
     ]
