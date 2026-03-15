@@ -65,7 +65,7 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output_path = f"/tmp/{user_id}/output.mp4"
 
     # Kurdish font support with Arabic script
-    font_name = "Speda"
+    font_name = "NRT"
     
     cmd = [
         "ffmpeg", "-y",
