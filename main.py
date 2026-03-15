@@ -189,7 +189,8 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
             json={
                 "audio_url": audio_url,
                 "speaker_labels": True,
-                "speakers_expected": num_speakers
+                "speakers_expected": num_speakers,
+                "speech_model": "universal-2"
             },
             timeout=30
         )
