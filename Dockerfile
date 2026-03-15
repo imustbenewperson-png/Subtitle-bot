@@ -1,8 +1,9 @@
 FROM python:3.11-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg wget && \
-    wget -O /usr/share/fonts/kurdish.ttf https://github.com/alirezastack/Unikurd/raw/master/Unikurd-Web.ttf && \
+    apt-get install -y --no-install-recommends ffmpeg wget fontconfig && \
+    wget -O /usr/share/fonts/kurdish.ttf "https://github.com/silnrsi/font-scheherazade/releases/download/v3.300/ScheherazadeNew-Regular.ttf" && \
+    fc-cache -fv && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
