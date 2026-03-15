@@ -18,9 +18,47 @@ WAITING_SRT = 4
 
 user_data = {}
 
+def to_srt_time(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+def translate_to_kurdish(text):
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama3-8b-8192",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "تۆ وەرگێڕی پسپۆڕی. هەر دەقێک بۆت دێت وەریبگێرە بۆ کوردی سورانی. تەنها دەقی وەرگێڕاوەکە بنووسە بەبێ هیچ شتێکی زیادە."
+                    },
+                    {
+                        "role": "user",
+                        "content": text
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": 500
+            },
+            timeout=30
+        )
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"].strip()
+        return text
+    except:
+        return text
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🎬 SRT دروست بکە", callback_data="make_srt")],
+        [InlineKeyboardButton("🎬 SRT کوردی دروست بکە", callback_data="make_srt")],
         [InlineKeyboardButton("🔥 SRT بخەرە ناو ڤیدیۆ", callback_data="burn_srt")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -73,7 +111,6 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
         if not success:
             await update.message.reply_text("نەمتوانی دابەزێنم ❌")
             return WAITING_VIDEO_FOR_SRT
-
     elif update.message.video or update.message.document or update.message.audio or update.message.voice:
         file = update.message.video or update.message.document or update.message.audio or update.message.voice
         await update.message.reply_text("وەرگرتم ⏳")
@@ -85,7 +122,6 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text("دەنگەکە دەردەهێنم... ⏳")
 
-    # Extract audio
     audio_path = f"/tmp/{user_id}/audio.mp3"
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
@@ -97,9 +133,8 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("کێشەیەک هەبوو لە دەرهێنانی دەنگدا ❌")
         return WAITING_VIDEO_FOR_SRT
 
-    await update.message.reply_text("Whisper AI گوێ دەگرێت... ⏳")
+    await update.message.reply_text("Whisper گوێ دەگرێت... ⏳")
 
-    # Send to Groq Whisper
     try:
         with open(audio_path, "rb") as f:
             response = requests.post(
@@ -115,33 +150,28 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
             )
 
         if response.status_code != 200:
-            await update.message.reply_text(f"کێشەیەک هەبوو لە Groq ❌\n{response.text}")
+            await update.message.reply_text(f"کێشەیەک هەبوو ❌")
             return WAITING_VIDEO_FOR_SRT
 
         data = response.json()
         segments = data.get("segments", [])
+        detected_lang = data.get("language", "نازانرێت")
 
         if not segments:
             await update.message.reply_text("هیچ دەنگێک نەدۆزرایەوە ❌")
             return WAITING_VIDEO_FOR_SRT
 
-        # Build SRT
+        await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ کوردی... ⏳")
+
         srt_content = ""
         for i, seg in enumerate(segments, 1):
             start = seg["start"]
             end = seg["end"]
-            text = seg["text"].strip()
+            original_text = seg["text"].strip()
+            kurdish_text = translate_to_kurdish(original_text)
+            srt_content += f"{i}\n{to_srt_time(start)} --> {to_srt_time(end)}\n{kurdish_text}\n\n"
 
-            def to_srt_time(seconds):
-                h = int(seconds // 3600)
-                m = int((seconds % 3600) // 60)
-                s = int(seconds % 60)
-                ms = int((seconds % 1) * 1000)
-                return f"{h:02}:{m:02}:{s:02},{ms:03}"
-
-            srt_content += f"{i}\n{to_srt_time(start)} --> {to_srt_time(end)}\n{text}\n\n"
-
-        srt_path = f"/tmp/{user_id}/output.srt"
+        srt_path = f"/tmp/{user_id}/output_kurdish.srt"
         with open(srt_path, "w", encoding="utf-8") as f:
             f.write(srt_content)
 
@@ -149,16 +179,15 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
         with open(srt_path, "rb") as f:
             await update.message.reply_document(
                 document=f,
-                filename="subtitles.srt",
-                caption=f"✅ {len(segments)} رستە دۆزرایەوە\nزمان: {data.get('language', 'نازانرێت')}"
+                filename="kurdish_subtitles.srt",
+                caption=f"✅ {len(segments)} رستە\nزمانی ئەسڵی: {detected_lang}\nوەرگێڕاوە بۆ: کوردی سورانی"
             )
 
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text("کێشەیەک هەبوو ❌")
 
-    # Cleanup
-    for f in [video_path, audio_path, srt_path]:
+    for f in [video_path, audio_path]:
         try:
             if os.path.exists(f):
                 os.remove(f)
