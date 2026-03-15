@@ -104,6 +104,8 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ffmpeg", "-y",
         "-i", video_path,
         "-vf", f"ass={ass_path}:fontsdir=/app",
+        "-preset", "ultrafast",
+        "-crf", "28",
         "-c:a", "copy",
         output_path
     ]
