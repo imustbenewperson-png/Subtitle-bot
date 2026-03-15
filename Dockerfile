@@ -8,7 +8,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN cp Speda-Bold.ttf /usr/share/fonts/ && fc-cache -fv
+RUN cp NRT-Reg.ttf /usr/share/fonts/ && fc-cache -fv
 
 RUN pip install python-telegram-bot==20.7
 
