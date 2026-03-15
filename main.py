@@ -64,12 +64,30 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video_path = user_data[user_id]["video"]
     output_path = f"/tmp/{user_id}/output.mp4"
 
-    font_path = "/app/NRT-Reg.ttf"
+    # Convert SRT to ASS format with Kurdish font
+    ass_path = f"/tmp/{user_id}/subtitle.ass"
+    
+    # First convert SRT to ASS
+    convert_cmd = [
+        "ffmpeg", "-y",
+        "-i", srt_path,
+        ass_path
+    ]
+    subprocess.run(convert_cmd, capture_output=True)
+    
+    # Modify ASS file to use our font
+    if os.path.exists(ass_path):
+        with open(ass_path, 'r', encoding='utf-8') as f:
+            ass_content = f.read()
+        ass_content = ass_content.replace('Style: Default,Arial', 'Style: Default,NRT Reg')
+        ass_content = ass_content.replace('Fontname: Arial', 'Fontname: NRT Reg')
+        with open(ass_path, 'w', encoding='utf-8') as f:
+            f.write(ass_content)
     
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-vf", f"subtitles={srt_path}:fontsdir=/app:force_style='FontName=NRT Reg,FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2'",
+        "-vf", f"ass={ass_path}:fontsdir=/app",
         "-c:a", "copy",
         output_path
     ]
