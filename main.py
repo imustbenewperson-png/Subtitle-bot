@@ -1,84 +1,205 @@
 import os
 import subprocess
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-WAITING_VIDEO = 1
-WAITING_SRT = 2
+WAITING_CHOICE = 1
+WAITING_VIDEO_FOR_SRT = 2
+WAITING_VIDEO_FOR_BURN = 3
+WAITING_SRT = 4
 
 user_data = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🎬 SRT دروست بکە", callback_data="make_srt")],
+        [InlineKeyboardButton("🔥 SRT بخەرە ناو ڤیدیۆ", callback_data="burn_srt")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "سڵاو! 👋\n\n"
-        "ئەم بۆتە ساب‌تایتڵی کوردی دەخاتە ناو ڤیدیۆکەت.\n\n"
-        "پێش هەموو شتێک لینکی ڤیدیۆکەت بنێرە 🎬\n"
-        "(Google Drive, YouTube, Telegram, هەر لینکێک)"
+        "سڵاو! 👋\n\nکام کارت دەوێت بکەیت؟",
+        reply_markup=reply_markup
     )
-    return WAITING_VIDEO
+    return WAITING_CHOICE
 
-async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "make_srt":
+        user_data[query.from_user.id] = {"mode": "make_srt"}
+        await query.edit_message_text(
+            "باشە! 🎬\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁"
+        )
+        return WAITING_VIDEO_FOR_SRT
+
+    elif query.data == "burn_srt":
+        user_data[query.from_user.id] = {"mode": "burn_srt"}
+        await query.edit_message_text(
+            "باشە! 🔥\n\nلینکی ڤیدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁"
+        )
+        return WAITING_VIDEO_FOR_BURN
+
+async def download_file(url, path):
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "-o", path, "--no-playlist", url],
+            capture_output=True, timeout=600
+        )
+        if result.returncode == 0:
+            return True
+        result2 = subprocess.run(["wget", "-O", path, url], capture_output=True, timeout=600)
+        return result2.returncode == 0
+    except:
+        return False
+
+async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    os.makedirs(f"/tmp/{user_id}", exist_ok=True)
+    video_path = f"/tmp/{user_id}/input_video"
+
+    if update.message.text and update.message.text.startswith("http"):
+        url = update.message.text.strip()
+        await update.message.reply_text("دابەزێنم... ⏳")
+        success = await download_file(url, video_path)
+        if not success:
+            await update.message.reply_text("نەمتوانی دابەزێنم ❌")
+            return WAITING_VIDEO_FOR_SRT
+
+    elif update.message.video or update.message.document or update.message.audio or update.message.voice:
+        file = update.message.video or update.message.document or update.message.audio or update.message.voice
+        await update.message.reply_text("وەرگرتم ⏳")
+        tg_file = await file.get_file()
+        await tg_file.download_to_drive(video_path)
+    else:
+        await update.message.reply_text("تکایە فایل یان لینک بنێرە 📁")
+        return WAITING_VIDEO_FOR_SRT
+
+    await update.message.reply_text("دەنگەکە دەردەهێنم... ⏳")
+
+    # Extract audio
+    audio_path = f"/tmp/{user_id}/audio.mp3"
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-vn", "-ar", "16000", "-ac", "1", "-b:a", "64k",
+        audio_path
+    ], capture_output=True)
+
+    if not os.path.exists(audio_path):
+        await update.message.reply_text("کێشەیەک هەبوو لە دەرهێنانی دەنگدا ❌")
+        return WAITING_VIDEO_FOR_SRT
+
+    await update.message.reply_text("Whisper AI گوێ دەگرێت... ⏳")
+
+    # Send to Groq Whisper
+    try:
+        with open(audio_path, "rb") as f:
+            response = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": ("audio.mp3", f, "audio/mpeg")},
+                data={
+                    "model": "whisper-large-v3",
+                    "response_format": "verbose_json",
+                    "timestamp_granularities[]": "segment"
+                },
+                timeout=120
+            )
+
+        if response.status_code != 200:
+            await update.message.reply_text(f"کێشەیەک هەبوو لە Groq ❌\n{response.text}")
+            return WAITING_VIDEO_FOR_SRT
+
+        data = response.json()
+        segments = data.get("segments", [])
+
+        if not segments:
+            await update.message.reply_text("هیچ دەنگێک نەدۆزرایەوە ❌")
+            return WAITING_VIDEO_FOR_SRT
+
+        # Build SRT
+        srt_content = ""
+        for i, seg in enumerate(segments, 1):
+            start = seg["start"]
+            end = seg["end"]
+            text = seg["text"].strip()
+
+            def to_srt_time(seconds):
+                h = int(seconds // 3600)
+                m = int((seconds % 3600) // 60)
+                s = int(seconds % 60)
+                ms = int((seconds % 1) * 1000)
+                return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+            srt_content += f"{i}\n{to_srt_time(start)} --> {to_srt_time(end)}\n{text}\n\n"
+
+        srt_path = f"/tmp/{user_id}/output.srt"
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(srt_content)
+
+        await update.message.reply_text("ئامادەیە! 🎉")
+        with open(srt_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename="subtitles.srt",
+                caption=f"✅ {len(segments)} رستە دۆزرایەوە\nزمان: {data.get('language', 'نازانرێت')}"
+            )
+
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await update.message.reply_text("کێشەیەک هەبوو ❌")
+
+    # Cleanup
+    for f in [video_path, audio_path, srt_path]:
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+        except:
+            pass
+
+    return ConversationHandler.END
+
+async def receive_video_for_burn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     os.makedirs(f"/tmp/{user_id}", exist_ok=True)
     video_path = f"/tmp/{user_id}/video.mp4"
 
-    if update.message.text and (update.message.text.startswith("http://") or update.message.text.startswith("https://")):
+    if update.message.text and update.message.text.startswith("http"):
         url = update.message.text.strip()
-        await update.message.reply_text("لینکەکەت وەرگرتم ✅\nدابەزێنم... چاوەڕێ بکە ⏳")
-        try:
-            result = subprocess.run(
-                ["yt-dlp", "-o", video_path, "--no-playlist", url],
-                capture_output=True, timeout=600
-            )
-            if result.returncode != 0:
-                result2 = subprocess.run(["wget", "-O", video_path, url], capture_output=True, timeout=600)
-                if result2.returncode != 0:
-                    await update.message.reply_text("نەمتوانی ڤیدیۆکە دابەزێنم ❌\nلینکەکە دووبارە تاقی بکەرەوە")
-                    return WAITING_VIDEO
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            await update.message.reply_text("کێشەیەک هەبوو لە دابەزاندنەکەدا ❌")
-            return WAITING_VIDEO
+        await update.message.reply_text("دابەزێنم... ⏳")
+        success = await download_file(url, video_path)
+        if not success:
+            await update.message.reply_text("نەمتوانی دابەزێنم ❌")
+            return WAITING_VIDEO_FOR_BURN
         await update.message.reply_text("ڤیدیۆکەت ئامادەیە ✅\nئێستا فایلی SRT بنێرە 📄")
-
-    elif update.message.video:
-        file = update.message.video
-        await update.message.reply_text("ڤیدیۆکەت وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
-        video_file = await file.get_file()
-        await video_file.download_to_drive(video_path)
-
-    elif update.message.document and update.message.document.mime_type and 'video' in update.message.document.mime_type:
-        file = update.message.document
-        await update.message.reply_text("ڤیدیۆکەت وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
-        video_file = await file.get_file()
-        await video_file.download_to_drive(video_path)
-
+    elif update.message.video or (update.message.document and 'video' in (update.message.document.mime_type or '')):
+        file = update.message.video or update.message.document
+        await update.message.reply_text("وەرگرتم ✅\nئێستا فایلی SRT بنێرە 📄")
+        tg_file = await file.get_file()
+        await tg_file.download_to_drive(video_path)
     else:
-        await update.message.reply_text("تکایە لینکی ڤیدیۆ یان فایلی ڤیدیۆ بنێرە 🎬")
-        return WAITING_VIDEO
+        await update.message.reply_text("تکایە فایل یان لینک بنێرە 📁")
+        return WAITING_VIDEO_FOR_BURN
 
-    user_data[user_id] = {"video": video_path}
+    user_data[user_id]["video"] = video_path
     return WAITING_SRT
 
 async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
-    if not update.message.document:
-        await update.message.reply_text("تکایە فایلی SRT بنێرە 📄")
-        return WAITING_SRT
-
-    filename = update.message.document.file_name or ""
-    if not filename.endswith(".srt"):
+    if not update.message.document or not (update.message.document.file_name or "").endswith(".srt"):
         await update.message.reply_text("تکایە فایلێکی SRT بنێرە 📄")
         return WAITING_SRT
 
-    await update.message.reply_text("فایلەکەت وەرگرتم ✅\nکاردەکەم... چەند خولەک چاوەڕێ بکە ⏳")
+    await update.message.reply_text("کاردەکەم... ⏳")
 
     srt_file = await update.message.document.get_file()
     srt_path = f"/tmp/{user_id}/subtitle.srt"
@@ -88,8 +209,7 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output_path = f"/tmp/{user_id}/output.mp4"
     ass_path = f"/tmp/{user_id}/subtitle.ass"
 
-    convert_cmd = ["ffmpeg", "-y", "-i", srt_path, ass_path]
-    subprocess.run(convert_cmd, capture_output=True)
+    subprocess.run(["ffmpeg", "-y", "-i", srt_path, ass_path], capture_output=True)
 
     if os.path.exists(ass_path):
         with open(ass_path, 'r', encoding='utf-8') as f:
@@ -100,20 +220,16 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f.write(ass_content)
 
     cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
+        "ffmpeg", "-y", "-i", video_path,
         "-vf", f"scale=640:360,ass={ass_path}:fontsdir=/app",
-        "-preset", "ultrafast",
-        "-crf", "35",
-        "-c:a", "copy",
-        output_path
+        "-preset", "ultrafast", "-crf", "35",
+        "-c:a", "copy", output_path
     ]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
         if result.returncode == 0 and os.path.exists(output_path):
-            await update.message.reply_text("ئامادەیە! دەینێرم بۆت 🎉")
+            await update.message.reply_text("ئامادەیە! 🎉")
             with open(output_path, "rb") as f:
                 await update.message.reply_document(
                     document=f,
@@ -121,41 +237,35 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption="ساب‌تایتڵی کوردی هاردکۆد کراوە ✅"
                 )
         else:
-            logger.error(f"FFmpeg error: {result.stderr}")
-            await update.message.reply_text("کێشەیەک هەبوو، دووبارە تاقی بکەرەوە ❌")
-
+            await update.message.reply_text("کێشەیەک هەبوو ❌")
     except subprocess.TimeoutExpired:
         await update.message.reply_text("ڤیدیۆکەت زۆر درێژە ❌")
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text("کێشەیەک هەبوو ❌")
 
-    try:
-        os.remove(video_path)
-        os.remove(srt_path)
-        if os.path.exists(ass_path):
-            os.remove(ass_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-    except:
-        pass
+    for f in [video_path, srt_path, ass_path, output_path]:
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+        except:
+            pass
 
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("هەڵوەشایەوە. /start بنووسە بۆ دەستپێکردنەوە")
+    await update.message.reply_text("هەڵوەشایەوە ❌\n/start بنووسە بۆ دەستپێکردنەوە")
     return ConversationHandler.END
 
 def main():
     app = Application.builder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            MessageHandler(filters.TEXT | filters.VIDEO | filters.Document.ALL, receive_video)
-        ],
+        entry_points=[CommandHandler("start", start)],
         states={
-            WAITING_VIDEO: [MessageHandler(filters.TEXT | filters.VIDEO | filters.Document.ALL, receive_video)],
+            WAITING_CHOICE: [CallbackQueryHandler(button_handler)],
+            WAITING_VIDEO_FOR_SRT: [MessageHandler(filters.ALL, receive_video_for_srt)],
+            WAITING_VIDEO_FOR_BURN: [MessageHandler(filters.ALL, receive_video_for_burn)],
             WAITING_SRT: [MessageHandler(filters.Document.ALL, receive_srt)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
