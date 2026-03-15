@@ -177,8 +177,7 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
         logger.info(f"Upload response: {upload_response.status_code} {upload_response.text[:200]}")
 
         if upload_response.status_code != 200:
-            await update.message.reply_text(f"کێشەیەک هەبوو لە بارکردندا ❌
-{upload_response.text[:100]}")
+            await update.message.reply_text("کێشەیەک هەبوو لە بارکردندا")
             return ConversationHandler.END
 
         audio_url = upload_response.json()["upload_url"]
@@ -199,8 +198,8 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
 
         tr_json = transcript_response.json()
         if "id" not in tr_json:
-            await update.message.reply_text(f"کێشەیەک هەبوو ❌
-{tr_json.get('error', '')}")
+            err = tr_json.get('error', '')
+            await update.message.reply_text(f"کێشەیەک هەبوو: {err}")
             return ConversationHandler.END
 
         transcript_id = tr_json["id"]
@@ -219,8 +218,8 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
             if result["status"] == "completed":
                 break
             elif result["status"] == "error":
-                await update.message.reply_text(f"کێشەیەک هەبوو ❌
-{result.get('error', '')}")
+                err = result.get('error', '')
+                await update.message.reply_text(f"کێشەیەک هەبوو: {err}")
                 return ConversationHandler.END
 
         # Get unique speakers
