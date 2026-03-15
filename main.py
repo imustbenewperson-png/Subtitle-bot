@@ -148,10 +148,12 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text("Whisper گوێ دەگرێت... ⏳")
 
+    mode = user_data.get(user_id, {}).get("mode", "make_srt")
     try:
         with open(audio_path, "rb") as f:
+            endpoint = "translations" if mode == "make_srt_raw" else "transcriptions"
             response = requests.post(
-                "https://api.groq.com/openai/v1/audio/transcriptions",
+                f"https://api.groq.com/openai/v1/audio/{endpoint}",
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 files={"file": ("audio.mp3", f, "audio/mpeg")},
                 data={
