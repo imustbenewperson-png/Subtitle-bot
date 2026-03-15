@@ -25,7 +25,11 @@ def to_srt_time(seconds):
     ms = int((seconds % 1) * 1000)
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
-def translate_to_kurdish(text):
+def translate_text(text, target_lang):
+    if target_lang == "kurdish":
+        system_msg = "You are a professional translator. Translate the following text to Kurdish Sorani. Only return the translated text, nothing else."
+    else:
+        system_msg = "You are a professional translator. Translate the following text to English. Only return the translated text, nothing else."
     try:
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -36,45 +40,7 @@ def translate_to_kurdish(text):
             json={
                 "model": "llama-3.3-70b-versatile",
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a professional translator. Translate the following text to Kurdish Sorani. Only return the translated text, nothing else."
-                    },
-                    {
-                        "role": "user",
-                        "content": text
-                    }
-                ],
-                "temperature": 0.3,
-                "max_tokens": 500
-            },
-            timeout=30
-        )
-        if response.status_code == 200:
-            translated = response.json()["choices"][0]["message"]["content"].strip()
-            logger.info(f"Translated: {text[:50]} -> {translated[:50]}")
-            return translated
-        else:
-            logger.error(f"Groq translation error: {response.status_code} {response.text}")
-            return text
-    except Exception as e:
-        logger.error(f"Translation exception: {e}")
-        return text
-
-def translate_to_english(text, source_lang):
-    if source_lang == "english" or source_lang == "en":
-        return text
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [
-                    {"role": "system", "content": "You are a professional translator. Translate the following text to English. Only return the translated text, nothing else."},
+                    {"role": "system", "content": system_msg},
                     {"role": "user", "content": text}
                 ],
                 "temperature": 0.3,
@@ -83,16 +49,20 @@ def translate_to_english(text, source_lang):
             timeout=30
         )
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"].strip()
-        return text
+            translated = response.json()["choices"][0]["message"]["content"].strip()
+            logger.info(f"Translated ({target_lang}): {text[:40]} -> {translated[:40]}")
+            return translated
+        else:
+            logger.error(f"Translation error: {response.status_code} {response.text}")
+            return text
     except Exception as e:
-        logger.error(f"English translation error: {e}")
+        logger.error(f"Translation exception: {e}")
         return text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🎬 SRT کوردی دروست بکە", callback_data="make_srt")],
-        [InlineKeyboardButton("📝 SRT بەبێ وەرگێران", callback_data="make_srt_raw")],
+        [InlineKeyboardButton("🎬 SRT کوردی دروست بکە", callback_data="make_srt_kurdish")],
+        [InlineKeyboardButton("🌍 SRT وەرگێران بۆ ئینگلیزی", callback_data="make_srt_english")],
         [InlineKeyboardButton("🔥 SRT بخەرە ناو ڤیدیۆ", callback_data="burn_srt")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -106,17 +76,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "make_srt":
-        user_data[query.from_user.id] = {"mode": "make_srt"}
+    if query.data == "make_srt_kurdish":
+        user_data[query.from_user.id] = {"mode": "make_srt_kurdish"}
         await query.edit_message_text(
             "باشە! 🎬\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁"
         )
         return WAITING_VIDEO_FOR_SRT
 
-    elif query.data == "make_srt_raw":
-        user_data[query.from_user.id] = {"mode": "make_srt_raw"}
+    elif query.data == "make_srt_english":
+        user_data[query.from_user.id] = {"mode": "make_srt_english"}
         await query.edit_message_text(
-            "باشە! 📝\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁"
+            "باشە! 🌍\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁"
         )
         return WAITING_VIDEO_FOR_SRT
 
@@ -144,6 +114,7 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.message.from_user.id
     os.makedirs(f"/tmp/{user_id}", exist_ok=True)
     video_path = f"/tmp/{user_id}/input_video"
+    mode = user_data.get(user_id, {}).get("mode", "make_srt_kurdish")
 
     if update.message.text and update.message.text.startswith("http"):
         url = update.message.text.strip()
@@ -176,23 +147,22 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text("Whisper گوێ دەگرێت... ⏳")
 
-    mode = user_data.get(user_id, {}).get("mode", "make_srt")
     try:
         with open(audio_path, "rb") as f:
             response = requests.post(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 files={"file": ("audio.mp3", f, "audio/mpeg")},
-                data={k: v for k, v in {
+                data={
                     "model": "whisper-large-v3",
                     "response_format": "verbose_json",
                     "timestamp_granularities[]": "segment"
-                }.items()},
+                },
                 timeout=120
             )
 
         if response.status_code != 200:
-            await update.message.reply_text(f"کێشەیەک هەبوو ❌")
+            await update.message.reply_text("کێشەیەک هەبوو ❌")
             return WAITING_VIDEO_FOR_SRT
 
         data = response.json()
@@ -203,17 +173,26 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("هیچ دەنگێک نەدۆزرایەوە ❌")
             return WAITING_VIDEO_FOR_SRT
 
-        await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ کوردی... ⏳")
+        if mode == "make_srt_kurdish":
+            target = "kurdish"
+            await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ کوردی سورانی... ⏳")
+            fname = "kurdish_subtitles.srt"
+            caption_end = "وەرگێڕاوە بۆ: کوردی سورانی"
+        else:
+            target = "english"
+            await update.message.reply_text(f"زمانی دۆزرایەوە: {detected_lang}\nوەردەگێرم بۆ ئینگلیزی... ⏳")
+            fname = "english_subtitles.srt"
+            caption_end = "وەرگێڕاوە بۆ: ئینگلیزی"
 
         srt_content = ""
         for i, seg in enumerate(segments, 1):
             start = seg["start"]
             end = seg["end"]
             original_text = seg["text"].strip()
-            kurdish_text = translate_to_kurdish(original_text)
-            srt_content += f"{i}\n{to_srt_time(start)} --> {to_srt_time(end)}\n{kurdish_text}\n\n"
+            translated_text = translate_text(original_text, target)
+            srt_content += f"{i}\n{to_srt_time(start)} --> {to_srt_time(end)}\n{translated_text}\n\n"
 
-        srt_path = f"/tmp/{user_id}/output_kurdish.srt"
+        srt_path = f"/tmp/{user_id}/{fname}"
         with open(srt_path, "w", encoding="utf-8") as f:
             f.write(srt_content)
 
@@ -221,18 +200,18 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
         with open(srt_path, "rb") as f:
             await update.message.reply_document(
                 document=f,
-                filename="kurdish_subtitles.srt",
-                caption=f"✅ {len(segments)} رستە\nزمانی ئەسڵی: {detected_lang}\nوەرگێڕاوە بۆ: کوردی سورانی"
+                filename=fname,
+                caption=f"✅ {len(segments)} رستە\nزمانی ئەسڵی: {detected_lang}\n{caption_end}"
             )
 
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text("کێشەیەک هەبوو ❌")
 
-    for f in [video_path, audio_path]:
+    for p in [video_path, audio_path]:
         try:
-            if os.path.exists(f):
-                os.remove(f)
+            if os.path.exists(p):
+                os.remove(p)
         except:
             pass
 
@@ -308,6 +287,7 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption="ساب‌تایتڵی کوردی هاردکۆد کراوە ✅"
                 )
         else:
+            logger.error(f"FFmpeg error: {result.stderr}")
             await update.message.reply_text("کێشەیەک هەبوو ❌")
     except subprocess.TimeoutExpired:
         await update.message.reply_text("ڤیدیۆکەت زۆر درێژە ❌")
@@ -315,10 +295,10 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {e}")
         await update.message.reply_text("کێشەیەک هەبوو ❌")
 
-    for f in [video_path, srt_path, ass_path, output_path]:
+    for p in [video_path, srt_path, ass_path, output_path]:
         try:
-            if os.path.exists(f):
-                os.remove(f)
+            if os.path.exists(p):
+                os.remove(p)
         except:
             pass
 
