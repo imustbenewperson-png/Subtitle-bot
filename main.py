@@ -581,6 +581,7 @@ def main():
             WAITING_SRT_FOR_TRANSLATE: [MessageHandler(filters.Document.ALL, receive_srt_for_translate)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     app.add_handler(conv_handler)
