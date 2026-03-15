@@ -93,7 +93,7 @@ def assemblyai_transcribe_with_speakers(audio_path, num_speakers):
         "audio_url": audio_url,
         "speaker_labels": True,
         "speakers_expected": num_speakers,
-        "speech_model": "best",
+        "speech_models": ["best"],
         "punctuate": True,
         "format_text": True
     }
