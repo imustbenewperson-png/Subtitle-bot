@@ -64,13 +64,12 @@ async def receive_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video_path = user_data[user_id]["video"]
     output_path = f"/tmp/{user_id}/output.mp4"
 
-    # Kurdish font support with Arabic script
-    font_name = "NRT"
+    font_path = "/app/NRT-Reg.ttf"
     
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-vf", f"subtitles={srt_path}:force_style='FontName={font_name},FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2'",
+        "-vf", f"subtitles={srt_path}:fontsdir=/app:force_style='FontName=NRT Reg,FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2'",
         "-c:a", "copy",
         output_path
     ]
