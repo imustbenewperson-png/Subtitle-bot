@@ -163,7 +163,9 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text("AssemblyAI دەنگەکان جیا دەکاتەوە... ⏳\nئەمە چەند خولەک کات دەبرێت")
 
     try:
-        # Upload audio to AssemblyAI
+        headers = {"authorization": ASSEMBLYAI_KEY, "content-type": "application/json"}
+
+        # Upload audio
         with open(audio_path, "rb") as f:
             upload_response = requests.post(
                 "https://api.assemblyai.com/v2/upload",
@@ -172,16 +174,19 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
                 timeout=120
             )
 
+        logger.info(f"Upload response: {upload_response.status_code} {upload_response.text[:200]}")
+
         if upload_response.status_code != 200:
-            await update.message.reply_text("کێشەیەک هەبوو لە بارکردندا ❌")
+            await update.message.reply_text(f"کێشەیەک هەبوو لە بارکردندا ❌
+{upload_response.text[:100]}")
             return ConversationHandler.END
 
         audio_url = upload_response.json()["upload_url"]
 
-        # Submit transcription with diarization
+        # Submit transcription
         transcript_response = requests.post(
             "https://api.assemblyai.com/v2/transcript",
-            headers={"authorization": ASSEMBLYAI_KEY, "content-type": "application/json"},
+            headers=headers,
             json={
                 "audio_url": audio_url,
                 "speaker_labels": True,
@@ -190,7 +195,15 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
             timeout=30
         )
 
-        transcript_id = transcript_response.json()["id"]
+        logger.info(f"Transcript response: {transcript_response.status_code} {transcript_response.text[:200]}")
+
+        tr_json = transcript_response.json()
+        if "id" not in tr_json:
+            await update.message.reply_text(f"کێشەیەک هەبوو ❌
+{tr_json.get('error', '')}")
+            return ConversationHandler.END
+
+        transcript_id = tr_json["id"]
 
         # Poll for result
         while True:
@@ -201,11 +214,13 @@ async def receive_speaker_number(update: Update, context: ContextTypes.DEFAULT_T
                 timeout=30
             )
             result = result_response.json()
+            logger.info(f"Poll status: {result.get('status')}")
 
             if result["status"] == "completed":
                 break
             elif result["status"] == "error":
-                await update.message.reply_text("کێشەیەک هەبوو ❌")
+                await update.message.reply_text(f"کێشەیەک هەبوو ❌
+{result.get('error', '')}")
                 return ConversationHandler.END
 
         # Get unique speakers
