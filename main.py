@@ -572,7 +572,7 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            WAITING_CHOICE: [CallbackQueryHandler(button_handler, pattern="^(make_srt_kurdish|make_srt_english|speaker_extract|translate_srt_kurdish|translate_srt_english|burn_srt)$")],
+            WAITING_CHOICE: [CallbackQueryHandler(button_handler)],
             WAITING_VIDEO_FOR_SRT: [MessageHandler(filters.ALL, receive_video_for_srt)],
             WAITING_VIDEO_FOR_BURN: [MessageHandler(filters.ALL, receive_video_for_burn)],
             WAITING_VIDEO_FOR_SPEAKER: [MessageHandler(filters.ALL, receive_video_for_speaker)],
