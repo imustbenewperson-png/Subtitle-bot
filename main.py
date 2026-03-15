@@ -38,7 +38,7 @@ def translate_to_kurdish(text):
                 "messages": [
                     {
                         "role": "system",
-                        "content": "تۆ وەرگێڕی پسپۆڕی. هەر دەقێک بۆت دێت وەریبگێرە بۆ کوردی سورانی. تەنها دەقی وەرگێڕاوەکە بنووسە بەبێ هیچ شتێکی زیادە."
+                        "content": "You are a professional translator. Translate the following text to Kurdish Sorani. Only return the translated text, nothing else."
                     },
                     {
                         "role": "user",
@@ -51,9 +51,14 @@ def translate_to_kurdish(text):
             timeout=30
         )
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"].strip()
-        return text
-    except:
+            translated = response.json()["choices"][0]["message"]["content"].strip()
+            logger.info(f"Translated: {text[:50]} -> {translated[:50]}")
+            return translated
+        else:
+            logger.error(f"Groq translation error: {response.status_code} {response.text}")
+            return text
+    except Exception as e:
+        logger.error(f"Translation exception: {e}")
         return text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
