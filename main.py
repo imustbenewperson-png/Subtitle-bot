@@ -61,6 +61,34 @@ def translate_to_kurdish(text):
         logger.error(f"Translation exception: {e}")
         return text
 
+def translate_to_english(text, source_lang):
+    if source_lang == "english" or source_lang == "en":
+        return text
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": "You are a professional translator. Translate the following text to English. Only return the translated text, nothing else."},
+                    {"role": "user", "content": text}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 500
+            },
+            timeout=30
+        )
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"].strip()
+        return text
+    except Exception as e:
+        logger.error(f"English translation error: {e}")
+        return text
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎬 SRT کوردی دروست بکە", callback_data="make_srt")],
@@ -151,16 +179,15 @@ async def receive_video_for_srt(update: Update, context: ContextTypes.DEFAULT_TY
     mode = user_data.get(user_id, {}).get("mode", "make_srt")
     try:
         with open(audio_path, "rb") as f:
-            endpoint = "translations" if mode == "make_srt_raw" else "transcriptions"
             response = requests.post(
-                f"https://api.groq.com/openai/v1/audio/{endpoint}",
+                "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 files={"file": ("audio.mp3", f, "audio/mpeg")},
-                data={
+                data={k: v for k, v in {
                     "model": "whisper-large-v3",
                     "response_format": "verbose_json",
                     "timestamp_granularities[]": "segment"
-                },
+                }.items()},
                 timeout=120
             )
 
