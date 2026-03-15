@@ -64,6 +64,7 @@ def translate_to_kurdish(text):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎬 SRT کوردی دروست بکە", callback_data="make_srt")],
+        [InlineKeyboardButton("📝 SRT بەبێ وەرگێران", callback_data="make_srt_raw")],
         [InlineKeyboardButton("🔥 SRT بخەرە ناو ڤیدیۆ", callback_data="burn_srt")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -81,6 +82,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[query.from_user.id] = {"mode": "make_srt"}
         await query.edit_message_text(
             "باشە! 🎬\n\nلینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە\n(Google Drive, YouTube, هەر لینکێک)\n\nیان فایلەکە ڕاستەوخۆ بنێرە 📁"
+        )
+        return WAITING_VIDEO_FOR_SRT
+
+    elif query.data == "make_srt_raw":
+        user_data[query.from_user.id] = {"mode": "make_srt_raw"}
+        await query.edit_message_text(
+            "باشە! 📝
+
+لینکی ڤیدیۆ یان ئۆدیۆکەت بنێرە
+(Google Drive, YouTube, هەر لینکێک)
+
+یان فایلەکە ڕاستەوخۆ بنێرە 📁"
         )
         return WAITING_VIDEO_FOR_SRT
 
