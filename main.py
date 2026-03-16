@@ -68,8 +68,8 @@ def assemblyai_diarize(audio_path, num_speakers):
             "speaker_labels": True,
             "speakers_expected": num_speakers,
             "speech_models": ["universal-3-pro", "universal-2"],
-            "punctuate": False,
-            "format_text": False,
+            "punctuate": True,
+            "format_text": True,
             "disfluencies": False
         }, timeout=30)
     if sub.status_code != 200:
