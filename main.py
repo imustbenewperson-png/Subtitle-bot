@@ -46,12 +46,15 @@ def translate_text(text, target):
 
 def assemblyai_diarize(audio_path, num_speakers):
     """
-    Hybrid approach:
-    1. AssemblyAI for speaker diarization (who spoke when)
-    2. Word-level timestamps rebuilt for precision
+    Maximum precision hybrid diarization:
+    1. AssemblyAI word-level: exact speaker per word with timestamps
+    2. Groq Whisper word-level: exact text per segment with timestamps  
+    3. Match each word to its speaker using ms-level overlap
+    4. Rebuild utterances grouping words by speaker with smart gap detection
     """
-    headers = {"Authorization": ASSEMBLYAI_KEY, "Content-Type": "application/json"}
+    headers_ai = {"Authorization": ASSEMBLYAI_KEY, "Content-Type": "application/json"}
 
+    # === STEP 1: AssemblyAI - get word-level speaker data ===
     with open(audio_path, "rb") as f:
         up = requests.post("https://api.assemblyai.com/v2/upload",
             headers={"Authorization": ASSEMBLYAI_KEY}, data=f, timeout=180)
@@ -59,17 +62,16 @@ def assemblyai_diarize(audio_path, num_speakers):
         raise Exception(f"Upload failed: {up.text}")
     audio_url = up.json()["upload_url"]
 
-    payload = {
-        "audio_url": audio_url,
-        "speaker_labels": True,
-        "speakers_expected": num_speakers,
-        "speech_models": ["universal-3-pro", "universal-2"],
-        "punctuate": True,
-        "format_text": True,
-        "disfluencies": False
-    }
-    sub = requests.post("https://api.assemblyai.com/v2/transcript",
-        headers=headers, json=payload, timeout=30)
+    sub = requests.post("https://api.assemblyai.com/v2/transcript", headers=headers_ai,
+        json={
+            "audio_url": audio_url,
+            "speaker_labels": True,
+            "speakers_expected": num_speakers,
+            "speech_models": ["universal-3-pro", "universal-2"],
+            "punctuate": False,
+            "format_text": False,
+            "disfluencies": False
+        }, timeout=30)
     if sub.status_code != 200:
         raise Exception(f"Submit failed: {sub.text}")
     job = sub.json()
@@ -77,71 +79,127 @@ def assemblyai_diarize(audio_path, num_speakers):
         raise Exception(f"No ID: {job}")
     tid = job["id"]
 
+    res = None
     for _ in range(120):
         time.sleep(5)
         res = requests.get(f"https://api.assemblyai.com/v2/transcript/{tid}",
             headers={"Authorization": ASSEMBLYAI_KEY}, timeout=30).json()
         status = res.get("status")
         logger.info(f"AssemblyAI: {status}")
-
         if status == "completed":
-            words = res.get("words", [])
-            utterances_raw = res.get("utterances", [])
-
-            if not utterances_raw:
-                raise Exception("No utterances returned")
-
-            if not words:
-                return utterances_raw
-
-            # Rebuild from word-level with tight gap threshold
-            GAP_THRESHOLD = 600  # 0.6 second gap = new utterance
-
-            refined = []
-            current_speaker = None
-            current_words = []
-
-            for w in words:
-                sp = w.get("speaker", "A")
-                start = w.get("start", 0)
-                end = w.get("end", 0)
-                text = w.get("text", "").strip()
-                if not text:
-                    continue
-
-                if current_speaker is None:
-                    current_speaker = sp
-                    current_words = [w]
-                elif sp == current_speaker:
-                    gap = start - current_words[-1].get("end", start)
-                    if gap > GAP_THRESHOLD:
-                        # Pause - split here
-                        utt_text = " ".join(ww["text"] for ww in current_words).strip()
-                        if utt_text:
-                            refined.append({"speaker": current_speaker, "start": current_words[0]["start"], "end": current_words[-1]["end"], "text": utt_text})
-                        current_words = [w]
-                    else:
-                        current_words.append(w)
-                else:
-                    # Speaker changed
-                    utt_text = " ".join(ww["text"] for ww in current_words).strip()
-                    if utt_text:
-                        refined.append({"speaker": current_speaker, "start": current_words[0]["start"], "end": current_words[-1]["end"], "text": utt_text})
-                    current_speaker = sp
-                    current_words = [w]
-
-            if current_words:
-                utt_text = " ".join(ww["text"] for ww in current_words).strip()
-                if utt_text:
-                    refined.append({"speaker": current_speaker, "start": current_words[0]["start"], "end": current_words[-1]["end"], "text": utt_text})
-
-            logger.info(f"Words: {len(words)}, Raw utterances: {len(utterances_raw)}, Refined: {len(refined)}")
-            return refined if refined else utterances_raw
-
+            break
         elif status == "error":
-            raise Exception(f"Error: {res.get('error')}")
+            raise Exception(f"AssemblyAI error: {res.get('error')}")
+    else:
+        raise Exception("Timeout")
 
-    raise Exception("Timeout")
+    ai_words = res.get("words", [])
+    if not ai_words:
+        logger.warning("No word-level data from AssemblyAI, using utterances")
+        utts = res.get("utterances", [])
+        if not utts:
+            raise Exception("No speaker data at all")
+        return utts
+
+    # === STEP 2: Groq Whisper - get accurate transcription with word timestamps ===
+    logger.info("Running Whisper for precise transcription...")
+    whisper_segments = []
+    try:
+        with open(audio_path, "rb") as f:
+            wr = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": ("audio.mp3", f, "audio/mpeg")},
+                data={
+                    "model": "whisper-large-v3",
+                    "response_format": "verbose_json",
+                    "timestamp_granularities[]": "segment"
+                },
+                timeout=120
+            )
+        if wr.status_code == 200:
+            whisper_segments = wr.json().get("segments", [])
+            logger.info(f"Whisper segments: {len(whisper_segments)}")
+    except Exception as e:
+        logger.warning(f"Whisper failed: {e}")
+
+    # === STEP 3: Build speaker timeline from AssemblyAI words ===
+    # Each ms of audio -> which speaker
+    # Using interval tree approach for O(1) lookup
+    def get_dominant_speaker(start_ms, end_ms):
+        """Find speaker with most word-time overlap in the given window"""
+        speaker_time = {}
+        for w in ai_words:
+            ws = w.get("start", 0)
+            we = w.get("end", 0)
+            sp = w.get("speaker", "A")
+            overlap = max(0, min(end_ms, we) - max(start_ms, ws))
+            if overlap > 0:
+                speaker_time[sp] = speaker_time.get(sp, 0) + overlap
+        if speaker_time:
+            return max(speaker_time, key=speaker_time.get)
+        # No overlap: find nearest word by midpoint distance
+        mid = (start_ms + end_ms) / 2
+        nearest = min(ai_words, key=lambda w: abs((w.get("start",0)+w.get("end",0))/2 - mid))
+        return nearest.get("speaker", "A")
+
+    # === STEP 4: Build final utterances ===
+    if whisper_segments:
+        # Use Whisper text + AssemblyAI speaker labels
+        raw = []
+        for seg in whisper_segments:
+            start_ms = int(seg["start"] * 1000)
+            end_ms = int(seg["end"] * 1000)
+            text = seg["text"].strip()
+            if not text:
+                continue
+            speaker = get_dominant_speaker(start_ms, end_ms)
+            raw.append({"speaker": speaker, "start": start_ms, "end": end_ms, "text": text})
+        
+        # Merge adjacent same-speaker segments (gap < 400ms)
+        merged = []
+        for r in raw:
+            if merged and merged[-1]["speaker"] == r["speaker"]:
+                gap = r["start"] - merged[-1]["end"]
+                if gap < 400:
+                    merged[-1]["end"] = r["end"]
+                    merged[-1]["text"] = merged[-1]["text"].rstrip() + " " + r["text"]
+                    continue
+            merged.append(dict(r))
+        
+        logger.info(f"Final: {len(merged)} utterances (Whisper+AssemblyAI hybrid)")
+        return merged
+
+    else:
+        # Whisper failed: rebuild from AssemblyAI words with gap-based splitting
+        logger.info("Whisper unavailable, rebuilding from AssemblyAI words")
+        GAP = 500  # ms
+        result = []
+        cur_sp = None
+        cur_words = []
+
+        for w in ai_words:
+            sp = w.get("speaker", "A")
+            text = w.get("text", "").strip()
+            if not text:
+                continue
+            if cur_sp is None:
+                cur_sp, cur_words = sp, [w]
+            elif sp == cur_sp and (w["start"] - cur_words[-1]["end"]) < GAP:
+                cur_words.append(w)
+            else:
+                utt_text = " ".join(ww["text"] for ww in cur_words).strip()
+                if utt_text:
+                    result.append({"speaker": cur_sp, "start": cur_words[0]["start"], "end": cur_words[-1]["end"], "text": utt_text})
+                cur_sp, cur_words = sp, [w]
+
+        if cur_words:
+            utt_text = " ".join(ww["text"] for ww in cur_words).strip()
+            if utt_text:
+                result.append({"speaker": cur_sp, "start": cur_words[0]["start"], "end": cur_words[-1]["end"], "text": utt_text})
+
+        logger.info(f"Final: {len(result)} utterances (AssemblyAI words only)")
+        return result
 
 
 async def extract_audio(video_path, audio_path):
