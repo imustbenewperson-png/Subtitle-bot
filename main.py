@@ -45,32 +45,104 @@ def translate_text(text, target):
         return text
 
 def assemblyai_diarize(audio_path, num_speakers):
+    """
+    Hybrid approach:
+    1. AssemblyAI for speaker diarization (who spoke when)
+    2. Word-level timestamps rebuilt for precision
+    """
     headers = {"Authorization": ASSEMBLYAI_KEY, "Content-Type": "application/json"}
+
     with open(audio_path, "rb") as f:
-        up = requests.post("https://api.assemblyai.com/v2/upload", headers={"Authorization": ASSEMBLYAI_KEY}, data=f, timeout=180)
+        up = requests.post("https://api.assemblyai.com/v2/upload",
+            headers={"Authorization": ASSEMBLYAI_KEY}, data=f, timeout=180)
     if up.status_code != 200:
         raise Exception(f"Upload failed: {up.text}")
     audio_url = up.json()["upload_url"]
-    sub = requests.post("https://api.assemblyai.com/v2/transcript", headers=headers,
-        json={"audio_url": audio_url, "speaker_labels": True, "speakers_expected": num_speakers, "speech_models": ["universal-3-pro", "universal-2"], "punctuate": True, "format_text": True}, timeout=30)
+
+    payload = {
+        "audio_url": audio_url,
+        "speaker_labels": True,
+        "speakers_expected": num_speakers,
+        "speech_models": ["universal-3-pro", "universal-2"],
+        "punctuate": True,
+        "format_text": True,
+        "disfluencies": False
+    }
+    sub = requests.post("https://api.assemblyai.com/v2/transcript",
+        headers=headers, json=payload, timeout=30)
     if sub.status_code != 200:
         raise Exception(f"Submit failed: {sub.text}")
     job = sub.json()
     if "id" not in job:
         raise Exception(f"No ID: {job}")
     tid = job["id"]
+
     for _ in range(120):
         time.sleep(5)
-        res = requests.get(f"https://api.assemblyai.com/v2/transcript/{tid}", headers={"Authorization": ASSEMBLYAI_KEY}, timeout=30).json()
-        logger.info(f"AssemblyAI: {res.get('status')}")
-        if res["status"] == "completed":
-            utts = res.get("utterances", [])
-            if not utts:
-                raise Exception("No utterances")
-            return utts
-        elif res["status"] == "error":
+        res = requests.get(f"https://api.assemblyai.com/v2/transcript/{tid}",
+            headers={"Authorization": ASSEMBLYAI_KEY}, timeout=30).json()
+        status = res.get("status")
+        logger.info(f"AssemblyAI: {status}")
+
+        if status == "completed":
+            words = res.get("words", [])
+            utterances_raw = res.get("utterances", [])
+
+            if not utterances_raw:
+                raise Exception("No utterances returned")
+
+            if not words:
+                return utterances_raw
+
+            # Rebuild from word-level with tight gap threshold
+            GAP_THRESHOLD = 600  # 0.6 second gap = new utterance
+
+            refined = []
+            current_speaker = None
+            current_words = []
+
+            for w in words:
+                sp = w.get("speaker", "A")
+                start = w.get("start", 0)
+                end = w.get("end", 0)
+                text = w.get("text", "").strip()
+                if not text:
+                    continue
+
+                if current_speaker is None:
+                    current_speaker = sp
+                    current_words = [w]
+                elif sp == current_speaker:
+                    gap = start - current_words[-1].get("end", start)
+                    if gap > GAP_THRESHOLD:
+                        # Pause - split here
+                        utt_text = " ".join(ww["text"] for ww in current_words).strip()
+                        if utt_text:
+                            refined.append({"speaker": current_speaker, "start": current_words[0]["start"], "end": current_words[-1]["end"], "text": utt_text})
+                        current_words = [w]
+                    else:
+                        current_words.append(w)
+                else:
+                    # Speaker changed
+                    utt_text = " ".join(ww["text"] for ww in current_words).strip()
+                    if utt_text:
+                        refined.append({"speaker": current_speaker, "start": current_words[0]["start"], "end": current_words[-1]["end"], "text": utt_text})
+                    current_speaker = sp
+                    current_words = [w]
+
+            if current_words:
+                utt_text = " ".join(ww["text"] for ww in current_words).strip()
+                if utt_text:
+                    refined.append({"speaker": current_speaker, "start": current_words[0]["start"], "end": current_words[-1]["end"], "text": utt_text})
+
+            logger.info(f"Words: {len(words)}, Raw utterances: {len(utterances_raw)}, Refined: {len(refined)}")
+            return refined if refined else utterances_raw
+
+        elif status == "error":
             raise Exception(f"Error: {res.get('error')}")
+
     raise Exception("Timeout")
+
 
 async def extract_audio(video_path, audio_path):
     subprocess.run(["ffmpeg", "-y", "-i", video_path, "-vn", "-ar", "16000", "-ac", "1", "-b:a", "64k", audio_path], capture_output=True)
