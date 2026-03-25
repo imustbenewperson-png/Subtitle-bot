@@ -156,19 +156,8 @@ def assemblyai_diarize(audio_path, num_speakers):
             speaker = get_dominant_speaker(start_ms, end_ms)
             raw.append({"speaker": speaker, "start": start_ms, "end": end_ms, "text": text})
         
-        # Merge adjacent same-speaker segments (gap < 400ms)
-        merged = []
-        for r in raw:
-            if merged and merged[-1]["speaker"] == r["speaker"]:
-                gap = r["start"] - merged[-1]["end"]
-                if gap < 400:
-                    merged[-1]["end"] = r["end"]
-                    merged[-1]["text"] = merged[-1]["text"].rstrip() + " " + r["text"]
-                    continue
-            merged.append(dict(r))
-        
-        logger.info(f"Final: {len(merged)} utterances (Whisper+AssemblyAI hybrid)")
-        return merged
+        logger.info(f"Final: {len(raw)} utterances (Whisper+AssemblyAI hybrid)")
+        return raw
 
     else:
         # Whisper failed: rebuild from AssemblyAI words with gap-based splitting
